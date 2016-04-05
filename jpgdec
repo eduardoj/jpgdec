@@ -1,0 +1,247 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+# pure perl jpeg to pnm decoder
+#
+# https://en.wikipedia.org/wiki/JPEG
+# https://www.w3.org/Graphics/JPEG/itu-t81.pdf
+#
+# https://en.wikipedia.org/wiki/Netpbm_format
+
+# our quantisation table(s)
+my @quant;
+
+# the huffman decoder tables
+my @huff;
+
+# image data
+my ($width, $height, $ncomp);
+
+# our component(s)
+my $comp;
+
+# zig-zag sequence, straight from the jpeg standard
+my @zig = ( 0, 1, 5, 6,14,15,27,28, 2, 4, 7,13,16,26,29,42,
+            3, 8,12,17,25,30,41,43, 9,11,18,24,31,40,44,53,
+           10,19,23,32,39,45,52,54,20,22,33,38,46,51,55,60,
+           21,34,37,47,50,56,59,61,35,36,48,49,57,58,62,63);
+
+# scaling factors for idct
+my @aaidct = (0.3535533906, 0.4903926402, 0.4619397663, 0.4157348062,
+              0.3535533906, 0.2777851165, 0.1913417162, 0.0975451610);
+
+
+# like zig, but ordered for idct purposes
+my @zig2 = ( 0,10, 3,21,20, 2,35, 9,14,39,25,50,46,16,57,31,
+             5,23,12,37,33, 7,48,18,27,52,41,59,55,29,62,44,
+            15,45,30,56,51,26,58,40,1,19, 8,34,22, 4,36,11,
+            28,54,43,61,60,42,63,53,6,32,17,47,38,13,49,24);
+
+# huffman decoder, modifies first arg!
+# returns the decoded value and the run number
+sub huffdec {
+  my (undef, $huff) = @_;
+  my $huffre = $huff->{'re'};
+  die("bad huffman decoding $huffre\n") unless substr($_[0], 0, 16) =~ /$huffre/s;
+  substr($_[0], 0, length($1), '');
+  my $v = $huff->{$1};
+  my $x = 0;
+  if ($v & 15) {
+    my $bits = substr($_[0], 0, $v & 15, '');
+    if ($bits =~ /^1/) {
+      $x = oct("0b$bits");
+    } else {
+      $bits =~ y/01/10/;
+      $x = -oct("0b$bits");
+    }
+  }
+  return ($x, $v >> 4);
+}
+
+# 8 value idct
+sub idct8 {
+  my ($t0, $t1, $t2, $t3, $t4, $t5, $t6, $t7) = @_;
+
+  ($t0, $t1) = ($t0 + $t1, $t0 - $t1);
+  ($t2, $t3) = ($t2 - $t3, $t2 + $t3);
+  $t2 = $t2 * 1.414213562 - $t3;
+  ($t0, $t3) = ($t0 + $t3, $t0 - $t3);
+  ($t1, $t2) = ($t1 + $t2, $t1 - $t2);
+  ($t4, $t7) = ($t4 - $t7, $t4 + $t7);
+  ($t5, $t6) = ($t5 + $t6, $t5 - $t6);
+  ($t5, $t7) = ($t5 - $t7, $t5 + $t7);
+  $t5 *= 1.414213562;
+  my $t = ($t4 + $t6) * 0.765366864;
+  ($t4, $t6) = ((1.847759064 - 0.765366864) * $t4 + $t, (1.847759064 + 0.765366864) * $t6 - $t);
+  $t6 -= $t7;
+  $t5 -= $t6;
+  $t4 -= $t5;
+  ($t0, $t7) = ($t0 + $t7, $t0 - $t7);
+  ($t1, $t6) = ($t1 + $t6, $t1 - $t6);
+  ($t2, $t5) = ($t2 + $t5, $t2 - $t5);
+  ($t3, $t4) = ($t3 + $t4, $t3 - $t4);
+  return ($t0, $t1, $t2, $t3, $t4, $t5, $t6, $t7);
+}
+
+# 8 x 8 idct
+sub idct {
+  my ($in, $qu) = @_;
+  my @tmp;
+  my @z = @zig2;
+  for my $i (0..7) {
+    @tmp[map {$_ * 8 + $i} 0..7] = idct8(map {$in->[$_] * $qu->[$_]} splice(@z, 0, 8));
+  }
+  return map {idct8(splice(@tmp, 0, 8))} 0..7;
+}
+
+# decode a component, modifies first arg!
+# returns 64 values of image data
+sub decode_scancomp {
+  my (undef, $scancomp) = @_;
+  my @dct = (0) x 64;
+  my $huffdc = $scancomp->{'huffdc'};
+  my $huffac = $scancomp->{'huffac'};
+  my $huffdcre = $huffdc->{'re'};
+  my $huffacre = $huffac->{'re'};
+  my ($v, $run);
+  ($v) = huffdec($_[0], $huffdc);
+  $scancomp->{'dc'} += $v;
+  $dct[0] = $scancomp->{'dc'};
+  my $i = 1;
+  while ($i < 64) {
+    ($v, $run) = huffdec($_[0], $huffac);
+    last if $v == 0 && $run == 0;
+    $i += $run;
+    $dct[$i++] = $v;
+  }
+  return idct(\@dct, $scancomp->{'quant'});
+}
+
+# gereate a gray image from one dct component
+sub set_image_gray {
+  my ($image, $xoff, $yoff, $nextline, $dct1) = @_;
+  for my $y (0..7) {
+    for my $x (0..7) {
+      $image->[($yoff + $y) * $nextline + $xoff + $x] = $dct1->[$y * 8 + $x] + 128;
+    }
+  }
+}
+
+
+# read in complete file
+open(STDIN, '<', $ARGV[0]) || die("$ARGV[0]: $!\n") if @ARGV;
+my $jpg = '';
+1 while sysread(STDIN, $jpg, 8192, length($jpg));
+
+# check jpg start marker SOI
+my ($marker, $type) = unpack("CC", substr($jpg, 0, 2, ''));
+die("not a jpeg\n") unless $marker == 255 && $type == 0xd8;
+
+# read tables until we get a SOS package
+while (1) {
+  my ($marker, $type, $len) = unpack("CCn", substr($jpg, 0, 4, ''));
+  die("bad jpeg\n") unless $marker == 255;
+  last if $type == 0xda;	# SOS
+  my $pkt = substr($jpg, 0, $len - 2, '');
+
+  if ($type == 0xdb) {		# DQT
+    my $pq = unpack("C", substr($pkt, 0, 1, ''));
+    die("only one quantisation table supported (yet)\n") unless $pq == 0;
+    die("bad quant table length\n") unless length($pkt) == 64;
+    @quant = unpack("C64", $pkt);
+    # prepare table for idct
+    for my $i (0 .. 7) {
+      for my $j (0 .. 7) {
+        $quant[$zig[$i * 8 + $j]] *= $aaidct[$i] * $aaidct[$j];
+      }
+    }
+  } elsif ($type == 0xc0) {	# SOF0
+    my $bits;
+    ($bits, $height, $width, $ncomp) = unpack("CnnC", substr($pkt, 0, 6, ''));
+    die("only 8-bit color depth supported\n") unless $bits == 8;
+    die("only one component supported (yet)\n") unless $ncomp == 1;
+    my ($cid, $hv, $tq) = unpack("CCC", $pkt);
+    $comp = {
+      'cid' => $cid,
+      'h' => $hv >> 4,
+      'v' => $hv & 15,
+      'tq' => $tq,
+    };
+    die("illegal quant table\n") if $tq > 3;
+    die("unknown quant table\n") if $tq != 0;
+    die("illegal h/v\n") if $comp->{'h'} > 3 || $comp->{'v'} > 3;
+  } elsif ($type == 0xc4) {	# DHT
+    while ($pkt ne '') {
+      my ($tc, @hufflen) = unpack("CC16", substr($pkt, 0, 17, ''));
+      die("bad huffman table\n") if $tc >= 32;
+      my ($si, $left, $code) = (0, 0, 0, 0);
+      while ($left || @hufflen) {
+	if (!$left) {
+	  $left = shift @hufflen;
+	  $si++;
+	  $code <<= 1;
+	} else {
+	  my $c = substr(unpack("B*", pack("N", $code)), -$si);
+	  $huff[$tc]->{$c} = unpack("C", substr($pkt, 0, 1, ''));
+	  $left--;
+	  $code++;
+	}
+      }
+      my $re = join('|', sort keys %{$huff[$tc]});
+      $huff[$tc]->{'re'} = qr/\A($re)/s;
+    }
+  } elsif ($type == 0xe0) {	# APP0
+    # ignore packet
+  } else {
+    die("unknown type $type\n");
+  }
+}
+
+# SOS package... the real image data
+my ($ns) = unpack("C", substr($jpg, 0, 1, ''));
+die("Only 1 scan supported (yet)\n") unless $ns == 1;
+my ($cid, $dcac) = unpack("CC", substr($jpg, 0, 2, ''));
+my $dctc = $dcac >> 4;
+my $actc = $dcac & 15;
+die("bad component selected\n") if $comp->{'cid'} != $cid;
+my $scancomp = {
+  'h' => $comp->{'h'},
+  'v' => $comp->{'v'},
+  'huffdc' => $huff[$dctc],
+  'huffac' => $huff[$actc + 16],
+  'quant' => \@quant,
+  'dc' => 0,	# dc component...
+};
+my ($ss, $se, $ahal) = unpack("CCC", substr($jpg, 0, 3, ''));
+die("not sequential baseline jpg\n") unless $ss == 0 && $se == 63 && $ahal == 0;
+
+# convert data into bitstream, undo byte stuffing
+my $jpgff = pack('CC', 255, 0);
+$jpg =~ s/$jpgff/substr($jpgff, 0, 1)/eg;
+$jpg = unpack('B*', $jpg);
+
+# fill decoded image data
+my @image;	# output image, unclamped
+my $mcusx = int(($width + 7) / 8);
+my $mcusy = int(($height + 7) / 8);
+my $nextline = $mcusx * 8;	# $nextline >= $width
+for my $my (0 .. ($mcusy - 1)) {
+  for my $mx (0 .. ($mcusx - 1)) {
+    my $dct1 = [ decode_scancomp($jpg, $scancomp) ];
+    set_image_gray(\@image, $mx * 8, $my * 8, $nextline, $dct1);
+  }
+}
+
+# output the image clamped to [0..255]
+printf "P2\n%d %d\n255\n", $width, $height;
+for my $y (0..($height-1)) {
+  for my $x (0..($width-1)) {
+    my $v = int($image[$y * $mcusx * 8 + $x]);
+    $v = 0 if $v < 0;
+    $v = 255 if $v > 255;
+    print "$v\n";
+  }
+}
+
+# should check EOI marker, but...
