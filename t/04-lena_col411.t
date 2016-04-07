@@ -11,6 +11,8 @@ my $command = "perl jpgdec t/data/$file_name";
 
 my $result = `$command`;
 
+
 isnt($? >> 8, 255, 'Execution without errors.');
+
 
 done_testing();

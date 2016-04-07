@@ -139,6 +139,27 @@ sub set_image_gray {
   }
 }
 
+# generate a 444 color image from three dcts component
+sub set_image_col444 {
+  my ($image, $xoff, $yoff, $nextline, $dcts) = @_;
+  for my $y (0..7) {
+    for my $x (0..7) {
+# R = Y + 1.402 (Cr-128)
+# G = Y - 0.34414 (Cb-128) - 0.71414 (Cr-128)
+# B = Y + 1.772 (Cb-128)
+      my $Y  = $dcts->[0]->[$y * 8 + $x] + 128;
+      my $Cb = $dcts->[1]->[$y * 8 + $x]; # 128 not added here. Will be substracted later
+      my $Cr = $dcts->[2]->[$y * 8 + $x]; # 128 not added here. Will be substracted later
+
+      my $pos = (($yoff + $y) * $nextline + $xoff + $x) * 3;
+
+      $image->[$pos    ] = $Y + 1.402 * $Cr;                   # R
+      $image->[$pos + 1] = $Y - 0.34414 * $Cb - 0.71414 * $Cr; # G
+      $image->[$pos + 2] = $Y + 1.772 * $Cb;                   # B
+    }
+  }
+}
+
 
 # read in complete file
 open(STDIN, '<', $ARGV[0]) || die("$ARGV[0]: $!\n") if @ARGV;
@@ -269,20 +290,48 @@ my @image;	# output image, unclamped
 my $mcusx = int(($width + 7) / 8);
 my $mcusy = int(($height + 7) / 8);
 my $nextline = $mcusx * 8;	# $nextline >= $width
-for my $my (0 .. ($mcusy - 1)) {
-  for my $mx (0 .. ($mcusx - 1)) {
-    my $dct1 = [ decode_scancomp($jpg, $scancomps->[0]) ]; # TODO
-    set_image_gray(\@image, $mx * 8, $my * 8, $nextline, $dct1);
+if ($ncomp == 1) { # Gray image
+  for my $my (0 .. ($mcusy - 1)) {
+    for my $mx (0 .. ($mcusx - 1)) {
+      my $dct1 = [ decode_scancomp($jpg, $scancomps->[0]) ];
+      set_image_gray(\@image, $mx * 8, $my * 8, $nextline, $dct1);
+    }
+  }
+}
+elsif ($ncomp == 3) { # Color image
+  for my $my (0 .. ($mcusy - 1)) {
+    for my $mx (0 .. ($mcusx - 1)) {
+      my $dcts = [];
+      for (my $i = 0; $i < $ncomp; $i++) {
+        $dcts->[$i] = [ decode_scancomp($jpg, $scancomps->[$i]) ];
+      }
+      set_image_col444(\@image, $mx * 8, $my * 8, $nextline, $dcts);
+    }
   }
 }
 
 # output the image clamped to [0..255]
-printf "P2\n%d %d\n255\n", $width, $height;
-for my $y (0..($height-1)) {
-  for my $x (0..($width-1)) {
-    my $v = int($image[$y * $mcusx * 8 + $x]);
-    $v = 0 if $v < 0;
-    $v = 255 if $v > 255;
-    print "$v\n";
+if ($ncomp == 1) { # Gray image
+  printf "P2\n%d %d\n255\n", $width, $height;
+  for my $y (0..($height-1)) {
+    for my $x (0..($width-1)) {
+      my $v = int($image[$y * $mcusx * 8 + $x]);
+      $v = 0 if $v < 0;
+      $v = 255 if $v > 255;
+      print "$v\n";
+    }
+  }
+}
+elsif ($ncomp == 3) { # Color image
+  printf "P3\n%d %d\n255\n", $width, $height;
+  for my $y (0..($height-1)) {
+    for my $x (0..($width-1)) {
+      for my $c (0..($ncomp-1)) {
+        my $v = int($image[($y * $mcusx * 8 + $x) * 3 + $c]);
+        $v = 0 if $v < 0;
+        $v = 255 if $v > 255;
+        print "$v\n";
+      }
+    }
   }
 }
