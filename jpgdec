@@ -21,6 +21,9 @@ my ($width, $height, $ncomp);
 # our component(s)
 my $comp;
 
+# SOS length
+my $sos_len;
+
 # zig-zag sequence, straight from the jpeg standard
 my @zig = ( 0, 1, 5, 6,14,15,27,28, 2, 4, 7,13,16,26,29,42,
             3, 8,12,17,25,30,41,43, 9,11,18,24,31,40,44,53,
@@ -37,6 +40,14 @@ my @zig2 = ( 0,10, 3,21,20, 2,35, 9,14,39,25,50,46,16,57,31,
              5,23,12,37,33, 7,48,18,27,52,41,59,55,29,62,44,
             15,45,30,56,51,26,58,40,1,19, 8,34,22, 4,36,11,
             28,54,43,61,60,42,63,53,6,32,17,47,38,13,49,24);
+
+sub _debug {
+  my ($message) = @_;
+
+  if ($ENV{DEBUG}) {
+    print STDERR "$message\n";
+  }
+}
 
 # huffman decoder, modifies first arg!
 # returns the decoded value and the run number
@@ -118,7 +129,7 @@ sub decode_scancomp {
   return idct(\@dct, $scancomp->{'quant'});
 }
 
-# gereate a gray image from one dct component
+# generate a gray image from one dct component
 sub set_image_gray {
   my ($image, $xoff, $yoff, $nextline, $dct1) = @_;
   for my $y (0..7) {
@@ -136,45 +147,68 @@ my $jpg = '';
 
 # check jpg start marker SOI
 my ($marker, $type) = unpack("CC", substr($jpg, 0, 2, ''));
-die("not a jpeg\n") unless $marker == 255 && $type == 0xd8;
+die("not a jpeg, SOI mark not found\n") unless $marker == 255 && $type == 0xd8;
+
+# check jpg end marker EOI
+($marker, $type) = unpack("CC", substr($jpg, length($jpg) - 2, 2, ''));
+die("not a jpeg, EOI mark not found\n") unless $marker == 255 && $type == 0xd9;
 
 # read tables until we get a SOS package
 while (1) {
   my ($marker, $type, $len) = unpack("CCn", substr($jpg, 0, 4, ''));
   die("bad jpeg\n") unless $marker == 255;
-  last if $type == 0xda;	# SOS
+_debug "marker, type: ".sprintf("0x%x", $type).", len: $len";
+  if ($type == 0xda) {	        # SOS
+    $sos_len = $len;
+    last;
+  }
+
   my $pkt = substr($jpg, 0, $len - 2, '');
 
   if ($type == 0xdb) {		# DQT
-    my $pq = unpack("C", substr($pkt, 0, 1, ''));
-    die("only one quantisation table supported (yet)\n") unless $pq == 0;
-    die("bad quant table length\n") unless length($pkt) == 64;
-    @quant = unpack("C64", $pkt);
+    my $pqtq = unpack("C", substr($pkt, 0, 1, ''));
+    my $pq = $pqtq >> 4;
+    die("only 8-bit precision for quantization elements supported (yet)\n") unless $pq == 0;
+    my $tq = $pqtq & 15;
+_debug "DQT, pq: $pq, tq: $tq";
+    die("Bad quantisation table length\n") unless length($pkt) == 64;
+    @{$quant[$tq]} = unpack("C64", $pkt);
     # prepare table for idct
     for my $i (0 .. 7) {
       for my $j (0 .. 7) {
-        $quant[$zig[$i * 8 + $j]] *= $aaidct[$i] * $aaidct[$j];
+        $quant[$tq][$zig[$i * 8 + $j]] *= $aaidct[$i] * $aaidct[$j];
       }
     }
   } elsif ($type == 0xc0) {	# SOF0
     my $bits;
     ($bits, $height, $width, $ncomp) = unpack("CnnC", substr($pkt, 0, 6, ''));
     die("only 8-bit color depth supported\n") unless $bits == 8;
-    die("only one component supported (yet)\n") unless $ncomp == 1;
-    my ($cid, $hv, $tq) = unpack("CCC", $pkt);
-    $comp = {
-      'cid' => $cid,
-      'h' => $hv >> 4,
-      'v' => $hv & 15,
-      'tq' => $tq,
-    };
-    die("illegal quant table\n") if $tq > 3;
-    die("unknown quant table\n") if $tq != 0;
-    die("illegal h/v\n") if $comp->{'h'} > 3 || $comp->{'v'} > 3;
+_debug "SOF0, bits: $bits";
+_debug "SOF0, height: $height, width: $width";
+_debug "SOF0, ncomp: $ncomp";
+#    die("only one component supported (yet)\n") unless $ncomp == 1;
+    my ($cid, $hv, $tq);
+    for (my $i = 0; $i < $ncomp; $i++) {
+      ($cid, $hv, $tq) = unpack("CCC", substr($pkt, 0, 3, ''));
+_debug "SOF0, each comp: $i, cid: $cid, h: ".($hv >> 4).", v: ".($hv & 15).", tq: $tq";
+      $comp->[$i] = {
+        'cid' => $cid,
+        'h' => $hv >> 4,
+        'v' => $hv & 15,
+        'tq' => $tq,
+      };
+      die("illegal quant table\n") if $tq > 3;
+#      die("unknown quant table\n") if $tq != 0;
+      die("illegal h/v\n") if $comp->[$i]->{'h'} > 3 || $comp->[$i]->{'v'} > 3;
+    }
   } elsif ($type == 0xc4) {	# DHT
     while ($pkt ne '') {
-      my ($tc, @hufflen) = unpack("CC16", substr($pkt, 0, 17, ''));
-      die("bad huffman table\n") if $tc >= 32;
+      my ($tcth, @hufflen) = unpack("CC16", substr($pkt, 0, 17, ''));
+#      die("bad huffman table\n") if $tc >= 32;
+      die("bad huffman table\n") if $tcth >= 32;
+      my $tc = $tcth >> 4;
+      my $th = $tcth & 15;
+_debug "DHT, tcth: $tcth, tc: $tc, th: $th";
       my ($si, $left, $code) = (0, 0, 0, 0);
       while ($left || @hufflen) {
 	if (!$left) {
@@ -183,37 +217,46 @@ while (1) {
 	  $code <<= 1;
 	} else {
 	  my $c = substr(unpack("B*", pack("N", $code)), -$si);
-	  $huff[$tc]->{$c} = unpack("C", substr($pkt, 0, 1, ''));
+	  $huff[$tcth]->{$c} = unpack("C", substr($pkt, 0, 1, ''));
 	  $left--;
 	  $code++;
 	}
       }
-      my $re = join('|', sort keys %{$huff[$tc]});
-      $huff[$tc]->{'re'} = qr/\A($re)/s;
+      my $re = join('|', sort keys %{$huff[$tcth]});
+      $huff[$tcth]->{'re'} = qr/\A($re)/s;
     }
   } elsif ($type == 0xe0) {	# APP0
     # ignore packet
+_debug "APP0, ignoring";
   } else {
     die("unknown type $type\n");
   }
 }
 
 # SOS package... the real image data
+_debug "SOS, length: $sos_len";
 my ($ns) = unpack("C", substr($jpg, 0, 1, ''));
-die("Only 1 scan supported (yet)\n") unless $ns == 1;
-my ($cid, $dcac) = unpack("CC", substr($jpg, 0, 2, ''));
-my $dctc = $dcac >> 4;
-my $actc = $dcac & 15;
-die("bad component selected\n") if $comp->{'cid'} != $cid;
-my $scancomp = {
-  'h' => $comp->{'h'},
-  'v' => $comp->{'v'},
-  'huffdc' => $huff[$dctc],
-  'huffac' => $huff[$actc + 16],
-  'quant' => \@quant,
-  'dc' => 0,	# dc component...
-};
+_debug "SOS, ns: $ns";
+#die("Only 1 scan supported (yet)\n") unless $ns == 1;
+my ($cid, $dcac);
+my $scancomps = [];
+for (my $i = 0; $i < @{$comp}; $i ++) {
+  ($cid, $dcac) = unpack("CC", substr($jpg, 0, 2, ''));
+  my $dctc = $dcac >> 4;
+  my $actc = $dcac & 15;
+_debug "SOS, Each scan component, i: $i, cid: $cid, dctc: $dctc, actc: $actc, comp->[i]->{'tq'}, ".$comp->[$i]->{'tq'};
+  die("bad component selected\n") if $comp->[$i]->{'cid'} != $cid;
+  $scancomps->[$i] = {
+    'h' => $comp->[$i]->{'h'},
+    'v' => $comp->[$i]->{'v'},
+    'huffdc' => $huff[$dctc],
+    'huffac' => $huff[$actc + 16],
+    'quant' => $quant[$comp->[$i]->{'tq'}],
+    'dc' => 0,	# dc component...
+  };
+}
 my ($ss, $se, $ahal) = unpack("CCC", substr($jpg, 0, 3, ''));
+_debug "SOS, ss: $ss, se: $se, ahal: $ahal";
 die("not sequential baseline jpg\n") unless $ss == 0 && $se == 63 && $ahal == 0;
 
 # convert data into bitstream, undo byte stuffing
@@ -228,7 +271,7 @@ my $mcusy = int(($height + 7) / 8);
 my $nextline = $mcusx * 8;	# $nextline >= $width
 for my $my (0 .. ($mcusy - 1)) {
   for my $mx (0 .. ($mcusx - 1)) {
-    my $dct1 = [ decode_scancomp($jpg, $scancomp) ];
+    my $dct1 = [ decode_scancomp($jpg, $scancomps->[0]) ]; # TODO
     set_image_gray(\@image, $mx * 8, $my * 8, $nextline, $dct1);
   }
 }
@@ -243,5 +286,3 @@ for my $y (0..($height-1)) {
     print "$v\n";
   }
 }
-
-# should check EOI marker, but...
