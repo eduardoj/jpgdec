@@ -144,18 +144,63 @@ sub set_image_col444 {
   my ($image, $xoff, $yoff, $nextline, $dcts) = @_;
   for my $y (0..7) {
     for my $x (0..7) {
-# R = Y + 1.402 (Cr-128)
-# G = Y - 0.34414 (Cb-128) - 0.71414 (Cr-128)
-# B = Y + 1.772 (Cb-128)
       my $Y  = $dcts->[0]->[$y * 8 + $x] + 128;
       my $Cb = $dcts->[1]->[$y * 8 + $x]; # 128 not added here. Will be substracted later
       my $Cr = $dcts->[2]->[$y * 8 + $x]; # 128 not added here. Will be substracted later
 
       my $pos = (($yoff + $y) * $nextline + $xoff + $x) * 3;
 
-      $image->[$pos    ] = $Y + 1.402 * $Cr;                   # R
-      $image->[$pos + 1] = $Y - 0.34414 * $Cb - 0.71414 * $Cr; # G
-      $image->[$pos + 2] = $Y + 1.772 * $Cb;                   # B
+      YCrCb_to_RGB ($image, $Y, $Cr, $Cb, $pos);
+    }
+  }
+}
+
+
+# fill RGB from YCrCb
+sub YCrCb_to_RGB {
+  my ($image , $Y, $Cr, $Cb, $pos) = @_;
+
+# $Cr and $Cb parameters must be substracted by 128
+
+# R = Y + 1.402 (Cr-128)
+# G = Y - 0.34414 (Cb-128) - 0.71414 (Cr-128)
+# B = Y + 1.772 (Cb-128)
+
+  $image->[$pos    ] = $Y + 1.402 * $Cr;                   # R
+  $image->[$pos + 1] = $Y - 0.34414 * $Cb - 0.71414 * $Cr; # G
+  $image->[$pos + 2] = $Y + 1.772 * $Cb;                   # B
+}
+
+
+# generate a 411 color image from three dcts component
+sub set_image_col411 {
+  my ($image, $width, $height, $xoff, $yoff, $nextline, $dcts) = @_;
+  for my $y (0..7) {
+    for my $x (0..7) {
+      my @Y;
+      foreach my $i (0 .. 3) {
+        $Y[$i]  = $dcts->[$i]->[$y * 8 + $x] + 128;
+      }
+      my $Cb = $dcts->[4]->[$y * 8 + $x]; # 128 not added here. Will be substracted later
+      my $Cr = $dcts->[5]->[$y * 8 + $x]; # 128 not added here. Will be substracted later
+
+      my $pos = (($yoff + $y) * $nextline + $xoff + $x) * 3;
+      YCrCb_to_RGB ($image, $Y[0], $Cr, $Cb, $pos);
+
+      if ($xoff + $x + 8 <= $width) {
+        $pos = (($yoff + $y) * $nextline + $xoff + $x + 8) * 3;
+        YCrCb_to_RGB ($image, $Y[1], $Cr, $Cb, $pos);
+      }
+
+      if ($yoff + $y + 8 <= $height) {
+        $pos = (($yoff + $y + 8) * $nextline + $xoff + $x) * 3;
+        YCrCb_to_RGB ($image, $Y[2], $Cr, $Cb, $pos);
+      }
+
+      if (($xoff + $x + 8 <= $width) && ($yoff + $y + 8 <= $height)) {
+        $pos = (($yoff + $y + 8) * $nextline + $xoff + $x + 8) * 3;
+        YCrCb_to_RGB ($image, $Y[3], $Cr, $Cb, $pos);
+      }
     }
   }
 }
@@ -179,14 +224,14 @@ while (1) {
   my ($marker, $type, $len) = unpack("CCn", substr($jpg, 0, 4, ''));
   die("bad jpeg\n") unless $marker == 255;
 _debug "marker, type: ".sprintf("0x%x", $type).", len: $len";
-  if ($type == 0xda) {	        # SOS
+  if ($type == 0xda) {         # SOS
     $sos_len = $len;
     last;
   }
 
   my $pkt = substr($jpg, 0, $len - 2, '');
 
-  if ($type == 0xdb) {		# DQT
+  if ($type == 0xdb) {         # DQT
     my $pqtq = unpack("C", substr($pkt, 0, 1, ''));
     my $pq = $pqtq >> 4;
     die("only 8-bit precision for quantization elements supported (yet)\n") unless $pq == 0;
@@ -200,7 +245,7 @@ _debug "DQT, pq: $pq, tq: $tq";
         $quant[$tq][$zig[$i * 8 + $j]] *= $aaidct[$i] * $aaidct[$j];
       }
     }
-  } elsif ($type == 0xc0) {	# SOF0
+  } elsif ($type == 0xc0) {    # SOF0
     my $bits;
     ($bits, $height, $width, $ncomp) = unpack("CnnC", substr($pkt, 0, 6, ''));
     die("only 8-bit color depth supported\n") unless $bits == 8;
@@ -222,7 +267,7 @@ _debug "SOF0, each comp: $i, cid: $cid, h: ".($hv >> 4).", v: ".($hv & 15).", tq
 #      die("unknown quant table\n") if $tq != 0;
       die("illegal h/v\n") if $comp->[$i]->{'h'} > 3 || $comp->[$i]->{'v'} > 3;
     }
-  } elsif ($type == 0xc4) {	# DHT
+  } elsif ($type == 0xc4) {    # DHT
     while ($pkt ne '') {
       my ($tcth, @hufflen) = unpack("CC16", substr($pkt, 0, 17, ''));
 #      die("bad huffman table\n") if $tc >= 32;
@@ -232,21 +277,21 @@ _debug "SOF0, each comp: $i, cid: $cid, h: ".($hv >> 4).", v: ".($hv & 15).", tq
 _debug "DHT, tcth: $tcth, tc: $tc, th: $th";
       my ($si, $left, $code) = (0, 0, 0, 0);
       while ($left || @hufflen) {
-	if (!$left) {
-	  $left = shift @hufflen;
-	  $si++;
-	  $code <<= 1;
-	} else {
-	  my $c = substr(unpack("B*", pack("N", $code)), -$si);
-	  $huff[$tcth]->{$c} = unpack("C", substr($pkt, 0, 1, ''));
-	  $left--;
-	  $code++;
-	}
+        if (!$left) {
+          $left = shift @hufflen;
+          $si++;
+          $code <<= 1;
+        } else {
+          my $c = substr(unpack("B*", pack("N", $code)), -$si);
+          $huff[$tcth]->{$c} = unpack("C", substr($pkt, 0, 1, ''));
+          $left--;
+          $code++;
+        }
       }
       my $re = join('|', sort keys %{$huff[$tcth]});
       $huff[$tcth]->{'re'} = qr/\A($re)/s;
     }
-  } elsif ($type == 0xe0) {	# APP0
+  } elsif ($type == 0xe0) {    # APP0
     # ignore packet
 _debug "APP0, ignoring";
   } else {
@@ -273,7 +318,7 @@ _debug "SOS, Each scan component, i: $i, cid: $cid, dctc: $dctc, actc: $actc, co
     'huffdc' => $huff[$dctc],
     'huffac' => $huff[$actc + 16],
     'quant' => $quant[$comp->[$i]->{'tq'}],
-    'dc' => 0,	# dc component...
+    'dc' => 0, # dc component...
   };
 }
 my ($ss, $se, $ahal) = unpack("CCC", substr($jpg, 0, 3, ''));
@@ -286,10 +331,11 @@ $jpg =~ s/$jpgff/substr($jpgff, 0, 1)/eg;
 $jpg = unpack('B*', $jpg);
 
 # fill decoded image data
-my @image;	# output image, unclamped
+my @image;     # output image, unclamped
 my $mcusx = int(($width + 7) / 8);
 my $mcusy = int(($height + 7) / 8);
-my $nextline = $mcusx * 8;	# $nextline >= $width
+my $nextline = $mcusx * 8;     # $nextline >= $width
+_debug "fill dcts, mcusy: $mcusy, mcusx: $mcusx, nextline: $nextline";
 if ($ncomp == 1) { # Gray image
   for my $my (0 .. ($mcusy - 1)) {
     for my $mx (0 .. ($mcusx - 1)) {
@@ -298,14 +344,36 @@ if ($ncomp == 1) { # Gray image
     }
   }
 }
-elsif ($ncomp == 3) { # Color image
+elsif ($ncomp == 3 && $scancomps->[0]->{'h'} == 1 && $scancomps->[0]->{'v'} == 1) { # Color image, 444 encoded
   for my $my (0 .. ($mcusy - 1)) {
     for my $mx (0 .. ($mcusx - 1)) {
       my $dcts = [];
-      for (my $i = 0; $i < $ncomp; $i++) {
-        $dcts->[$i] = [ decode_scancomp($jpg, $scancomps->[$i]) ];
+      for (my $each_comp = 0; $each_comp < $ncomp; $each_comp++) {
+        $dcts->[$each_comp] = [ decode_scancomp($jpg, $scancomps->[$each_comp]) ];
       }
       set_image_col444(\@image, $mx * 8, $my * 8, $nextline, $dcts);
+    }
+  }
+}
+elsif ($ncomp == 3 && $scancomps->[0]->{'h'} == 2 && $scancomps->[0]->{'v'} == 2) { # Color image, 411 encoded
+  my $mcusx2 = int(($width + 15) / 16);
+  my $mcusy2 = int(($height + 15) / 16);
+_debug "fill dcts, mcusy2: $mcusy2, mcusx2: $mcusx2";
+  for my $my2 (0 .. (($mcusy2) - 1)) {
+    for my $mx2 (0 .. (($mcusx2) - 1)) {
+      my $dcts = [];
+      my $i = 0;
+      my $each_comp = 0;
+      foreach my $i (0 .. 3) {
+        $dcts->[$i] = [ decode_scancomp($jpg, $scancomps->[$each_comp]) ];
+      }
+
+      foreach my $i (4 .. 5) {
+        $each_comp++;
+        $dcts->[$i] = [ decode_scancomp($jpg, $scancomps->[$each_comp]) ];
+      }
+
+      set_image_col411(\@image, $width, $height, $mx2 * 16, $my2 * 16, $nextline, $dcts);
     }
   }
 }
@@ -324,9 +392,9 @@ if ($ncomp == 1) { # Gray image
 }
 elsif ($ncomp == 3) { # Color image
   printf "P3\n%d %d\n255\n", $width, $height;
-  for my $y (0..($height-1)) {
-    for my $x (0..($width-1)) {
-      for my $c (0..($ncomp-1)) {
+  for my $y (0 .. ($height-1)) {
+    for my $x (0 .. ($width-1)) {
+      for my $c (0 .. 2) { # R G B
         my $v = int($image[($y * $mcusx * 8 + $x) * 3 + $c]);
         $v = 0 if $v < 0;
         $v = 255 if $v > 255;
