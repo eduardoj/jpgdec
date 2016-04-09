@@ -175,32 +175,22 @@ sub YCrCb_to_RGB {
 # generate a 411 color image from three dcts component
 sub set_image_col411 {
   my ($image, $width, $height, $xoff, $yoff, $nextline, $dcts) = @_;
-  for my $y (0..7) {
-    for my $x (0..7) {
-      my @Y;
-      foreach my $i (0 .. 3) {
-        $Y[$i]  = $dcts->[$i]->[$y * 8 + $x] + 128;
-      }
-      my $Cb = $dcts->[4]->[$y * 8 + $x]; # 128 not added here. Will be substracted later
-      my $Cr = $dcts->[5]->[$y * 8 + $x]; # 128 not added here. Will be substracted later
+
+  my $x_max = ($xoff + 15 > $width ) ? ($width  - $xoff - 1) : 15;
+  my $y_max = ($yoff + 15 > $height) ? ($height - $yoff - 1) : 15;
+
+  for my $y (0 .. $y_max) {
+    for my $x (0 .. $x_max) {
+      my $i       = int($y / 8) * 2 + int($x / 8); # Each Y sample: 0, 1, 2, or 3.
+      my $y_index = ($y % 8) * 8 + $x % 8; # Y index : 0, 1, 2, ..., 62, 63.
+      my $c_index = $y * 4 + int($x / 4); # Chroma index : 0, 1, 2, ..., 62, 63.
+
+      my $Y  = $dcts->[$i]->[$y_index] + 128;
+      my $Cb = $dcts->[4]->[$c_index]; # 128 not added here. Will be substracted later
+      my $Cr = $dcts->[5]->[$c_index]; # 128 not added here. Will be substracted later
 
       my $pos = (($yoff + $y) * $nextline + $xoff + $x) * 3;
-      YCrCb_to_RGB ($image, $Y[0], $Cr, $Cb, $pos);
-
-      if ($xoff + $x + 8 <= $width) {
-        $pos = (($yoff + $y) * $nextline + $xoff + $x + 8) * 3;
-        YCrCb_to_RGB ($image, $Y[1], $Cr, $Cb, $pos);
-      }
-
-      if ($yoff + $y + 8 <= $height) {
-        $pos = (($yoff + $y + 8) * $nextline + $xoff + $x) * 3;
-        YCrCb_to_RGB ($image, $Y[2], $Cr, $Cb, $pos);
-      }
-
-      if (($xoff + $x + 8 <= $width) && ($yoff + $y + 8 <= $height)) {
-        $pos = (($yoff + $y + 8) * $nextline + $xoff + $x + 8) * 3;
-        YCrCb_to_RGB ($image, $Y[3], $Cr, $Cb, $pos);
-      }
+      YCrCb_to_RGB ($image, $Y, $Cr, $Cb, $pos);
     }
   }
 }

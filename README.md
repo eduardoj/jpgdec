@@ -1,5 +1,15 @@
 # JPG decoder script
 
+## Description
+
+This perl script takes a jpg file as its first argument, and prints as result the ASCII encoding of a .pgm or .ppm file, based on the format of the .jpg input file.
+
+It currently supports as input file the following:
+* Gray images.
+* Color images, with 4:4:4 subsampling.
+* Color images, with 4:1:1 subsampling.
+
+
 ## Usage (by examples)
 
 * Normal invocation:
@@ -14,6 +24,7 @@ $ perl jpgdec t/data/lena_gray.jpg
 $ DEBUG=1 perl jpgdec t/data/lena_col444.jpg
 ```
 
+
 ## Testing
 
 * All tests:
@@ -27,6 +38,7 @@ $ make tests
 ```
 $ perl t/03-lena_col444.t
 ```
+
 
 ## References
 
